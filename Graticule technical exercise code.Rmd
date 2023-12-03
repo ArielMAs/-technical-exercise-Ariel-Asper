@@ -1,0 +1,185 @@
+---
+title: "Graticule technical exercise"
+author: "Ariel Asper"
+date: "12/3/2023"
+output: html_document
+---
+
+<ul>libraries used in analysis:
+<li>dplyr
+<li>lubridate
+<li>data.table
+</ul>
+
+```{r,echo=FALSE,warning=FALSE}
+#Libraries used:
+library(dplyr)
+library(lubridate)
+library(data.table)
+
+```
+
+## 1. Load the data tables into dataframe(s) or a database
+```{r}
+patient_table <- read.csv('C:/Users/Ariel/Downloads/patient_table.csv')
+encounter_table <- read.csv('C:/Users/Ariel/Downloads/encounter_table.csv')
+```
+
+
+## 2. Compute median age at index date for the exposed cohort (including CI at 95% confidence level)
+
+### Frist, lets convert the date variables into type "Date" variables and remove all encounters not in study period:
+```{r}
+patient_table$birthdate <- as.Date(patient_table$birthdate)
+patient_table$deceaseddate <- as.Date(patient_table$deceaseddate)
+encounter_table <- encounter_table%>%
+                   mutate(start_date = as.Date('2022-07-01'),#As stated in guidelines
+                          end_date= as.Date('2022-12-31'),#As stated in guidelines
+                          encounterdate = as.Date(encounterdate))%>%
+  filter(encounterdate>=start_date)#filter out all encounters not in study period ie., keep only those with encounter dates from July 1st though Dec 31st 2022
+
+```
+
+### Next, we will identify our exposure cohort and calcualte median(including CI at 95% confidence level)
+
+```{r,warning=FALSE}
+# lets see who will enter exposure group. This will be done by filtering out those who were never exposed.
+# In cases where individual was exposed multiple times,index date will be date at first exposure.
+Exposed <- encounter_table%>%
+  filter(exposure=='True')%>%#Extract only those who have been exposed at some point during study period.
+  group_by(patientid)%>%
+  arrange(encounterdate)%>%
+  filter(row_number()==1)%>%#extract first encounter where exposed
+  rename("index_date"='encounterdate')#first date when exposed is identified as index date.
+
+#Lets merge Exposed df with patient in order to get birth date data 
+Exposed <- merge(Exposed,patient_table,by=c('patientid'),all.x = T)
+
+#calculate age at index date for exposed cohort
+Exposed <- Exposed%>%
+  mutate(Index_date_age=round(as.numeric((index_date-birthdate)/365)))%>%
+  select(-exposure,-outcome,-start_date,-end_date)#remove unnecessary variables 
+
+#Calculating median of age at Index date
+med = median(Exposed$Index_date_age)
+#Calculating CI at 95% confidence level using Wilcoxon test.
+wt <- wilcox.test(Exposed$Index_date_age,conf.int = T)
+
+#Print results
+print(paste0('Median age at index date for the exposed cohort is:',med, ' with CI of [',round(wt$conf.int[1]),'-',round(wt$conf.int[2]),']',' at 95% confidence level'))
+```
+
+#### <b>Answer:</b> Median age at index date for the exposed cohort is:50 with CI of [45-60] at 95% confidence level
+
+
+## 3. Compute aggregate time at risk for the exposed cohort, in person-days
+
+<ol><b>In order to do so we need to:</b>
+<li> Define end date for follow-up period.
+<li> Calculate, for each individual, days until end of follow-up.
+<li> The Sum of all days at risk for exposure group will give us the time at risk in person days.
+
+End of follow-up will be Dec 31st 2022 or death. Whichever comes first.
+
+```{r}
+df <- merge(Exposed,encounter_table,by=c('patientid'),all.x = T)
+#first event date
+df <- df %>% group_by(patientid)%>%
+  mutate(event_date=fifelse(outcome=="True",encounterdate,as.Date(NA)))%>%
+  mutate(event_date = fifelse(event_date<index_date,as.Date(NA),event_date))
+
+df$end_date <- pmin(as.Date('2022-12-31'),df$deceaseddate,df$event_date,na.rm = T)
+
+#Calculate days at risk
+PD = df%>%
+  group_by(patientid)%>%
+  summarise(end_date = min(end_date),index_date = min(index_date))%>%
+  mutate(at_risk_days = 1+(end_date-index_date))%>%summarise(sum_person_days=sum(at_risk_days))
+print(paste0('time at risk for the exposed cohort, in person-days is: ',as.numeric(PD),' person days'))
+```
+
+
+#### <b>Answer:</b> time at risk for the exposed cohort, in person-days is: 1820 person days
+
+
+
+##  Finally, provide pseudo-code to select a 1:1 unexposed cohort based on the method outlined above.
+
+
+#### Input:
+  
+<ul>
+<li>full_df: Dataframe containing patient information in long format. Each row detailing encounter information and demographic information.
+<li>match_vars: Vector of variables for exact matching.
+
+
+
+#### Output:
+<ul><li>matched_data: Dataframe containing matched pairs of exposed and control units.</ul>
+
+### Algorithm:
+  
+#### Data Preparation:
+
+<ol>
+<li>Initialize empty DataFrame called "matched_data".
+<li>Set group indicator to 1.
+<li>Filter out all encounter dates after index date for those exposed.
+<li>Add a new variable : is_control (logical).
+<li>Initialize is_control to FALSE for exposed individuals and TRUE for controls.
+
+<li>for each encounter in DataFrame:</ul>
+|       If is_control is FALSE:
+|           If yes:
+|             Check if encounter was at least 7 days prior to index_date: 
+|             If yes, set is_control to TRUE for that encounter
+|           If no:
+|             Delete that row
+|
+
+
+<li>Split the DataFrame into two DataFrames
+<ul><li>Exposure: Those with is_control set to FALSE
+<li>No exposure:Those with is_control set to TRUE
+<li> Create copies of both DataFrames</ul>
+
+
+#### Matching loop:
+
+
+| For each individual in the exposed DataFrame:
+|   a. For each individual in the no_exposure DataFrame:
+|       i. Check if the no_exposure individual matches the exposed individual on match_vars.
+|       ii. If yes:
+|           a. Check if the no_exposure individual's encounter date is within 7 days of the exposed individual's index_date.
+|           b. If yes:
+|               i. Check if the no_exposure individual is already in matched_data with is_control set to TRUE.
+|               ii. If no:
+|                   1. Add the pair to matched_data with the current group_indicator.
+|                   2. Remove both individuals from their respective DataFrames.
+|                   3. Break and return to the first loop.
+|   b. Increment group_indicator by one.
+
+
+#### Handle unmatched units:
+  
+<ul>
+<li>If there are remaining exposed units with is_control = FALSE, they are not matched. Consider handling them separately (e.g., exclude from analysis).
+<li>If there are remaining control units with is_control = TRUE, they were not used as matches. Consider handling them separately (e.g., exclude from analysis or use as additional controls).
+<li> Other things to conciser in this situation could be:
+<ul> 
+<li> Selecting other matching method.
+<li> Matching on less variables.
+<li> Allowing for some differnce between cases and controls(e.g., allowing to be matched if older or younger by X years).
+</ul></ul>
+####   Combine results:
+  
+Join matched_data with the original exposed and control DataFrames on common identifiers (e.g., ID variable) to retain additional information.
+
+### Return:
+  
+   <b>matched_data</b>
+
+
+In practice, using matchit function from Matchit library would be more efficient.
+
